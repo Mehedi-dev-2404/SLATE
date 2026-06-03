@@ -6,7 +6,7 @@ from slate.config import settings
 from slate.database import get_client
 from slate.pipeline import orchestrator
 
-MOCK_MODE = True
+MOCK_MODE = False
 
 router = APIRouter()
 
@@ -49,7 +49,6 @@ async def _run_start_job(
     questions_text = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
     payload = {
         "text": f"🔍 Got it. A few quick questions before I build:\n\n{questions_text}",
-        "thread_ts": trigger_id,
     }
     await _post_to_slack(payload)
 
