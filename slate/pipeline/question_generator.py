@@ -5,7 +5,7 @@ from anthropic import AsyncAnthropic
 from slate.config import settings
 from slate.models.carousel import BrandAnalysis, StyleAnalysis
 
-MOCK_MODE = True
+MOCK_MODE = False
 
 _FALLBACK_QUESTIONS = [
     "Who is this carousel for — your own brand or a client?",
