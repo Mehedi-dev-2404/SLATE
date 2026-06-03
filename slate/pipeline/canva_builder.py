@@ -1,10 +1,20 @@
 import httpx
 
-from slate.config import settings
+from slate.config import Settings
 
-MOCK_MODE = True
+MOCK_MODE = False
 
-_CANVA_API_BASE = "https://api.canva.com/rest/v1"
+CANVA_API_BASE = "https://api.canva.com/rest/v1"
+
+
+async def get_canva_client(settings: Settings) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        headers={
+            "Authorization": f"Bearer {settings.canva_access_token}",
+            "Content-Type": "application/json",
+        },
+        timeout=30.0,
+    )
 
 
 async def build_canva_carousel(
@@ -15,74 +25,40 @@ async def build_canva_carousel(
         print("canva_builder: MOCK_MODE — returning mock Canva URL", flush=True)
         return "https://www.canva.com/design/mock-slate-carousel/view"
 
-    headers = {
-        "Authorization": f"Bearer {settings.CANVA_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    settings = Settings()
+    print("canva_builder: creating Canva design...", flush=True)
 
-    async with httpx.AsyncClient(base_url=_CANVA_API_BASE, headers=headers) as client:
+    async with await get_canva_client(settings) as client:
         # Step 1: Create design
+        create_payload: dict = {
+            "design_type": {
+                "type": "preset",
+                "name": "presentation",
+            },
+            "title": brief["topic"][:50],
+        }
+        if brand_kit_id:
+            create_payload["brand_template_id"] = brand_kit_id
+
         try:
-            create_payload: dict = {
-                "design_type": {"type": "preset", "name": "InstagramPost"},
-                "title": brief["topic"][:50],
-            }
-            if brand_kit_id:
-                create_payload["brand_kit_id"] = brand_kit_id
-
-            resp = await client.post("/designs", json=create_payload)
-            if resp.status_code not in (200, 201):
-                print(
-                    f"canva_builder: create design failed — {resp.status_code} {resp.text}",
-                    flush=True,
-                )
-                raise RuntimeError(f"Canva API error: {resp.status_code}")
-            design_id = resp.json()["design"]["id"]
-        except RuntimeError:
-            raise
+            resp = await client.post(f"{CANVA_API_BASE}/designs", json=create_payload)
         except Exception as exc:
-            print(f"canva_builder: error creating design — {exc}", flush=True)
+            print(f"canva_builder: request error — {exc}", flush=True)
             raise
 
-        # Step 2: Build pages list
-        pages = []
+        if resp.status_code not in (200, 201):
+            print(f"canva_builder: create design failed {resp.status_code} — {resp.text}", flush=True)
+            raise RuntimeError(f"Canva create design failed: {resp.status_code}")
 
-        # Hook page
-        pages.append({"title": brief["hook"], "body": ""})
+        design_data = resp.json()
+        design_id = design_data.get("design", {}).get("id")
+        if not design_id:
+            print(f"canva_builder: no design_id in response — {resp.text}", flush=True)
+            raise RuntimeError("Canva: no design_id returned")
 
-        # Body slides
-        for slide in brief.get("slides", []):
-            pages.append(
-                {
-                    "title": slide["title"],
-                    "body": slide["body_copy"],
-                    "notes": slide["visual_direction"],
-                }
-            )
+        print(f"canva_builder: design created — {design_id}", flush=True)
 
-        # CTA page
-        cta = brief.get("cta_slide", {})
-        pages.append(
-            {
-                "title": cta.get("headline", ""),
-                "body": cta.get("sub_copy", ""),
-            }
-        )
-
-        # Add pages to design
-        try:
-            for page in pages:
-                resp = await client.post(f"/designs/{design_id}/pages", json=page)
-                if resp.status_code not in (200, 201):
-                    print(
-                        f"canva_builder: add page failed — {resp.status_code} {resp.text}",
-                        flush=True,
-                    )
-                    raise RuntimeError(f"Canva API error: {resp.status_code}")
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            print(f"canva_builder: error adding pages — {exc}", flush=True)
-            raise
-
-    return f"https://www.canva.com/design/{design_id}/edit"
+        # Step 2: Return edit URL
+        url = f"https://www.canva.com/design/{design_id}/edit"
+        print(f"canva_builder: done — {url}", flush=True)
+        return url

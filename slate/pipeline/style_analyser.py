@@ -7,7 +7,7 @@ from anthropic import Anthropic
 from slate.config import settings
 from slate.models.carousel import StyleAnalysis
 
-MOCK_MODE = True
+MOCK_MODE = False
 
 _SYSTEM_PROMPT = (
     "You are a design analyst. Analyse this Instagram carousel slide or style reference. Extract: "
@@ -88,3 +88,60 @@ async def analyse_style(
         slide_structure=data["slide_structure"],
         design_density=data["design_density"],
     )
+
+
+if __name__ == "__main__":
+    import asyncio
+    import base64
+
+    import httpx
+
+    async def test_real_vision():
+        url = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Camponotus_flavomarginatus_ant.jpg/320px-Camponotus_flavomarginatus_ant.jpg"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url)
+            image_data = base64.b64encode(resp.content).decode()
+
+        from slate.config import Settings
+        settings = Settings()
+        from anthropic import AsyncAnthropic
+        anthropic = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+        response = await anthropic.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are a design analyst. Analyse this image. Extract: "
+                            "layout_pattern (how elements are arranged), "
+                            "slide_structure (narrative flow if applicable), "
+                            "design_density (minimal/balanced/busy). "
+                            "Return ONLY a JSON object with keys: layout_pattern, slide_structure, design_density. "
+                            "No markdown, no preamble."
+                        ),
+                    },
+                ],
+            }],
+        )
+        raw = response.content[0].text
+        print(f"Raw Haiku response: {raw}")
+        import json
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(clean)
+        print(f"Parsed: {parsed}")
+        assert "layout_pattern" in parsed
+        print("style_analyser vision: PASS")
+
+    asyncio.run(test_real_vision())

@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     SLACK_SIGNING_SECRET: str = ""
     SLACK_WEBHOOK_URL: str = ""
     CANVA_API_KEY: str = ""
+    canva_access_token: str = ""
+    canva_refresh_token: str = ""
+    canva_client_id: str = ""
+    canva_client_secret: str = ""
 
     class Config:
         env_file = ".env"
