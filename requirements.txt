@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+supabase
+anthropic
+pydantic-settings
+python-multipart
+httpx
+slack-sdk
