@@ -78,26 +78,43 @@ async def run_autonomous_pipeline(
         {"status": "done", "carousel_job_id": r1["job_id"]}
     ).eq("id", calendar_id).execute()
 
-    # Step 7 — post to Slack
-    slack_payload = {
-        "text": (
-            f"📅 *New carousel ready*\n\n"
-            f"*Topic:* {topic}\n"
-            f"*Type:* {slot['content_type']}\n"
-            f"*Hook:* {r2['brief']['hook']}\n\n"
-            f"🎨 {r2['canva_url']}"
-        )
-    }
+    # Step 7 — upload images to Slack then post summary
+    channel_id = brand_profile.get("slack_channel_id", "")
+    images = r2.get("images", [])
+    urls: list[str] = []
+    if images and channel_id:
+        try:
+            from slate.pipeline.image_generator import upload_images_to_slack
+            urls = await upload_images_to_slack(
+                images=images,
+                channel_id=channel_id,
+                slack_bot_token=settings.SLACK_BOT_TOKEN,
+                topic=topic,
+            )
+        except Exception as exc:
+            print(f"scheduler: image upload failed — {exc}", flush=True)
+
+    summary_text = (
+        f"📅 *New carousel ready!*\n\n"
+        f"*Topic:* {topic}\n"
+        f"*Hook:* {r2['brief']['hook']}\n\n"
+        f"{len(urls)} slides uploaded above ☝️\n\n"
+        f"*Caption:* {r2['brief'].get('caption', '')}"
+    )
     try:
         async with httpx.AsyncClient() as http:
-            await http.post(settings.SLACK_WEBHOOK_URL, json=slack_payload)
+            await http.post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+                json={"channel": channel_id, "text": summary_text},
+            )
     except Exception as exc:
-        print(f"scheduler: Slack post failed — {exc}", flush=True)
+        print(f"scheduler: Slack summary post failed — {exc}", flush=True)
 
     print(f"scheduler: autonomous pipeline done workspace={workspace_id} job={r1['job_id']}", flush=True)
     return {
         "carousel_job_id": r1["job_id"],
-        "canva_url": r2["canva_url"],
+        "images": images,
         "topic": topic,
     }
 

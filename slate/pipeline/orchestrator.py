@@ -6,8 +6,8 @@ from slate.pipeline import (
     style_analyser,
     question_generator,
     brief_builder,
-    canva_builder,
 )
+from slate.pipeline.image_generator import generate_carousel
 
 MOCK_MODE = False
 
@@ -91,14 +91,13 @@ async def start_job(
         raise
 
     print(f"orchestrator: start_job complete job_id={job_id} questions={len(questions)}", flush=True)
-    return {"job_id": job_id, "questions": questions}
+    return {"job_id": job_id, "questions": questions, "brand_analysis": brand_analysis}
 
 
 async def complete_job(job_id: str, user_answers: str) -> dict:
     print(f"orchestrator: complete_job job_id={job_id} MOCK_MODE={MOCK_MODE}", flush=True)
 
     if MOCK_MODE:
-        # Use mock brand/style data so downstream modules run normally
         brand_analysis = BrandAnalysis(
             palette=["#1B2B4B", "#F5F0E8", "#E8604C"],
             tone="Direct and confident, slightly informal",
@@ -141,16 +140,16 @@ async def complete_job(job_id: str, user_answers: str) -> dict:
             _db_update(job_id, {"status": "failed"})
         raise
 
-    # Phase 2b — Canva design
+    # Phase 2b — image generation
     try:
-        canva_url = await canva_builder.build_canva_carousel(brief)
+        images = await generate_carousel(brief, brand_tone=brand_analysis.tone)
         if not MOCK_MODE:
-            _db_update(job_id, {"canva_url": canva_url, "status": "done"})
+            _db_update(job_id, {"canva_url": f"images_generated:{len(images)}", "status": "done"})
     except Exception as exc:
-        print(f"orchestrator: canva_builder failed — {exc}", flush=True)
+        print(f"orchestrator: image_generator failed — {exc}", flush=True)
         if not MOCK_MODE:
             _db_update(job_id, {"status": "failed"})
         raise
 
-    print(f"orchestrator: complete_job done job_id={job_id} canva_url={canva_url}", flush=True)
-    return {"canva_url": canva_url, "brief": brief}
+    print(f"orchestrator: complete_job done job_id={job_id} images={len(images)}", flush=True)
+    return {"images": images, "brief": brief}

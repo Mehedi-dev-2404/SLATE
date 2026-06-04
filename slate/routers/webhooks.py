@@ -1,5 +1,3 @@
-import asyncio
-
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
@@ -59,9 +57,7 @@ async def _handle_dm(user_id: str, text: str) -> None:
         await _dm(user_id, result["message"])
 
         if result.get("complete"):
-            # Onboarding done — wait for Supabase to commit the row before
-            # fetching it back, otherwise onboarding_complete may not be True yet
-            await asyncio.sleep(2)
+            # Onboarding done — kick off first autonomous carousel
             await _dm(user_id, "⚡ Generating your first carousel now...")
             try:
                 fresh = (
@@ -71,26 +67,18 @@ async def _handle_dm(user_id: str, text: str) -> None:
                     .limit(1)
                     .execute()
                 )
-                if not fresh.data:
-                    raise RuntimeError("brand_profiles row not found after onboarding commit")
                 brand_profile = fresh.data[0]
-                print(
-                    f"[webhooks] first carousel — workspace={user_id} "
-                    f"onboarding_complete={brand_profile.get('onboarding_complete')}",
-                    flush=True,
-                )
                 from slate.pipeline.scheduler import run_autonomous_pipeline
                 result2 = await run_autonomous_pipeline(user_id, brand_profile)
+                n_slides = len(result2.get("images", []))
                 await _dm(
                     user_id,
                     f"🎨 *Your first carousel is ready!*\n\n"
                     f"*Topic:* {result2['topic']}\n\n"
-                    f"{result2['canva_url']}"
+                    f"{n_slides} slides uploaded above ☝️"
                 )
             except Exception as exc:
-                import traceback
                 print(f"[webhooks] first carousel error: {exc}", flush=True)
-                print(traceback.format_exc(), flush=True)
                 await _dm(user_id, "⚠️ Couldn't generate first carousel — try 'make a carousel' when ready.")
         return
 
@@ -122,12 +110,24 @@ async def _handle_dm(user_id: str, text: str) -> None:
                 slack_bot_token=settings.SLACK_BOT_TOKEN,
             )
             r2 = await orchestrator.complete_job(r1["job_id"], user_answers)
-            await _dm(
-                user_id,
-                f"✅ *Carousel ready!*\n\n"
-                f"*Hook:* {r2['brief']['hook']}\n\n"
-                f"🎨 {r2['canva_url']}"
-            )
+            images = r2.get("images", [])
+            if images:
+                from slate.pipeline.image_generator import upload_images_to_slack
+                await upload_images_to_slack(
+                    images=images,
+                    channel_id=user_id,
+                    slack_bot_token=settings.SLACK_BOT_TOKEN,
+                    topic=r2["brief"]["topic"],
+                )
+                reply = (
+                    f"✅ *Carousel ready!*\n\n"
+                    f"Hook: _{r2['brief']['hook']}_\n\n"
+                    f"{len(images)} slides uploaded above ☝️\n\n"
+                    f"Caption: {r2['brief'].get('caption', '')}"
+                )
+            else:
+                reply = f"✅ Brief ready but image generation failed. Hook: {r2['brief']['hook']}"
+            await _dm(user_id, reply)
         except Exception as exc:
             print(f"[webhooks] carousel error: {exc}", flush=True)
             await _dm(user_id, f"⚠️ Something went wrong: {exc}")

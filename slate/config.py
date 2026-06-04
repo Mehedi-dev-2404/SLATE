@@ -8,15 +8,12 @@ class Settings(BaseSettings):
     SLACK_BOT_TOKEN: str = ""
     SLACK_SIGNING_SECRET: str = ""
     SLACK_WEBHOOK_URL: str = ""
-    CANVA_API_KEY: str = ""
-    canva_access_token: str = ""
-    canva_refresh_token: str = ""
-    canva_client_id: str = ""
-    canva_client_secret: str = ""
+    google_api_key: str = ""
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()
