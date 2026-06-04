@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
@@ -57,7 +59,9 @@ async def _handle_dm(user_id: str, text: str) -> None:
         await _dm(user_id, result["message"])
 
         if result.get("complete"):
-            # Onboarding done — kick off first autonomous carousel
+            # Onboarding done — wait for Supabase to commit the row before
+            # fetching it back, otherwise onboarding_complete may not be True yet
+            await asyncio.sleep(2)
             await _dm(user_id, "⚡ Generating your first carousel now...")
             try:
                 fresh = (
@@ -67,7 +71,14 @@ async def _handle_dm(user_id: str, text: str) -> None:
                     .limit(1)
                     .execute()
                 )
+                if not fresh.data:
+                    raise RuntimeError("brand_profiles row not found after onboarding commit")
                 brand_profile = fresh.data[0]
+                print(
+                    f"[webhooks] first carousel — workspace={user_id} "
+                    f"onboarding_complete={brand_profile.get('onboarding_complete')}",
+                    flush=True,
+                )
                 from slate.pipeline.scheduler import run_autonomous_pipeline
                 result2 = await run_autonomous_pipeline(user_id, brand_profile)
                 await _dm(
@@ -77,7 +88,9 @@ async def _handle_dm(user_id: str, text: str) -> None:
                     f"{result2['canva_url']}"
                 )
             except Exception as exc:
+                import traceback
                 print(f"[webhooks] first carousel error: {exc}", flush=True)
+                print(traceback.format_exc(), flush=True)
                 await _dm(user_id, "⚠️ Couldn't generate first carousel — try 'make a carousel' when ready.")
         return
 
