@@ -5,7 +5,7 @@ from anthropic import AsyncAnthropic
 from slate.config import settings
 from slate.database import get_client
 
-MOCK_MODE = True
+MOCK_MODE = False
 
 _MOCK_TOPICS = {
     "educational": "3 signs your business is ready to automate",

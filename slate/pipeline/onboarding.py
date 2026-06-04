@@ -1,6 +1,6 @@
 from slate.database import get_client
 
-MOCK_MODE = True
+MOCK_MODE = False
 
 _STEP_QUESTIONS = {
     1: "*Question 1 of 6:* What's your business name and what do you do in one sentence?",
