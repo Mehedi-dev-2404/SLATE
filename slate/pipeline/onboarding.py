@@ -1,3 +1,5 @@
+import asyncio
+
 from slate.database import get_client
 
 MOCK_MODE = False
@@ -108,14 +110,22 @@ async def process_onboarding_reply(
         cadence = _parse_cadence(answer)
 
         if not MOCK_MODE:
-            get_client().table("brand_profiles").update(
-                {
-                    "cadence": cadence,
-                    "onboarding_complete": True,
-                    "onboarding_step": 7,
-                    "updated_at": "now()",
-                }
-            ).eq("workspace_id", workspace_id).execute()
+            try:
+                get_client().table("brand_profiles").update(
+                    {
+                        "cadence": cadence,
+                        "onboarding_complete": True,
+                        "onboarding_step": 7,
+                        "updated_at": "now()",
+                    }
+                ).eq("workspace_id", workspace_id).execute()
+                print(f"onboarding: step 6 DB write confirmed for workspace={workspace_id}", flush=True)
+            except Exception as exc:
+                print(f"onboarding: step 6 DB write failed workspace={workspace_id} — {exc}", flush=True)
+                raise
+            # Give Supabase time to propagate the row before the caller
+            # fetches the brand profile for the first autonomous carousel
+            await asyncio.sleep(2)
 
         return {
             "message": (
