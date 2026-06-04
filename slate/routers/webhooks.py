@@ -4,8 +4,7 @@ from fastapi.responses import JSONResponse
 
 from slate.config import settings
 from slate.database import get_client
-from slate.pipeline import onboarding, orchestrator
-from slate.pipeline import content_strategist
+from slate.pipeline import content_strategist, onboarding, orchestrator
 
 MOCK_MODE = False
 
@@ -13,269 +12,220 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Slack Web API helper — DM replies via chat.postMessage
 # ---------------------------------------------------------------------------
 
-async def _post_to_slack(payload: dict) -> None:
-    """POST payload to SLACK_WEBHOOK_URL, or print in MOCK_MODE."""
-    if MOCK_MODE:
-        print(f"[webhooks] MOCK_MODE — would POST to Slack: {payload}", flush=True)
-        return
+async def _dm(user_id: str, text: str) -> None:
     async with httpx.AsyncClient() as client:
-        await client.post(settings.SLACK_WEBHOOK_URL, json=payload)
-
-
-# ---------------------------------------------------------------------------
-# Background tasks
-# ---------------------------------------------------------------------------
-
-async def _run_start_job(
-    user_id: str,
-    channel_id: str,
-    topic: str,
-    trigger_id: str,
-) -> None:
-    result = await orchestrator.start_job(
-        slack_user_id=user_id,
-        slack_channel_id=channel_id,
-        slack_thread_ts=trigger_id,
-        topic=topic,
-        brand_image_urls=[],
-        style_image_url=None,
-        slack_bot_token=settings.SLACK_BOT_TOKEN,
-    )
-    job_id = result["job_id"]
-    questions = result["questions"]
-
-    questions_text = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
-    payload = {
-        "text": f"🔍 Got it. A few quick questions before I build:\n\n{questions_text}",
-    }
-    await _post_to_slack(payload)
-
-
-async def _run_complete_job(job_id: str, user_text: str, thread_ts: str) -> None:
-    result = await orchestrator.complete_job(job_id, user_text)
-    brief = result["brief"]
-    canva_url = result["canva_url"]
-
-    payload = {
-        "text": (
-            f"✅ Carousel brief built!\n\n"
-            f"*Hook:* {brief['hook']}\n\n"
-            f"🎨 Canva: {canva_url}"
-        ),
-        "thread_ts": thread_ts,
-    }
-    await _post_to_slack(payload)
-
-
-async def _run_setup(workspace_id: str, channel_id: str) -> None:
-    result = await onboarding.start_onboarding(workspace_id, channel_id)
-    await _post_to_slack({"text": result["message"]})
-
-
-async def _run_onboarding_reply(workspace_id: str, step: int, text: str) -> None:
-    result = await onboarding.process_onboarding_reply(workspace_id, step, text)
-    await _post_to_slack({"text": result["message"]})
-
-
-async def _run_record_performance(
-    workspace_id: str, carousel_job_id: str, hook: str,
-    topic: str, content_type: str, rating: str,
-) -> None:
-    await content_strategist.record_performance(
-        workspace_id, carousel_job_id, hook, topic, content_type, rating
-    )
-    await _post_to_slack({"text": "Thanks! I'll use that to improve future carousels."})
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-@router.post("/webhooks/slack")
-async def slack_slash_command(
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> JSONResponse:
-    # Slack url_verification (JSON body)
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        body = await request.json()
-        if "challenge" in body:
-            return JSONResponse({"challenge": body["challenge"]})
-
-    form = await request.form()
-
-    # Slack url_verification via form (edge case)
-    if "challenge" in form:
-        return JSONResponse({"challenge": form["challenge"]})
-
-    user_id = form.get("user_id", "")
-    channel_id = form.get("channel_id", "")
-    topic = (form.get("text") or "").strip()
-    trigger_id = form.get("trigger_id", "")
-
-    background_tasks.add_task(
-        _run_start_job, user_id, channel_id, topic, trigger_id
-    )
-
-    return JSONResponse(
-        {"text": "⚡ Analysing your brand... I'll post questions in a moment."}
-    )
-
-
-@router.post("/webhooks/slate-setup")
-async def slate_setup(
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> JSONResponse:
-    form = await request.form()
-    channel_id = form.get("channel_id", "")
-    workspace_id = channel_id
-
-    background_tasks.add_task(_run_setup, workspace_id, channel_id)
-
-    return JSONResponse({"text": "Starting setup..."})
-
-
-@router.post("/webhooks/slate-status")
-async def slate_status(request: Request) -> JSONResponse:
-    form = await request.form()
-    workspace_id = form.get("channel_id", "")
-
-    if MOCK_MODE:
-        db_rows = []
-    else:
-        db = get_client()
-        result = (
-            db.table("brand_profiles")
-            .select("*")
-            .eq("workspace_id", workspace_id)
-            .limit(1)
-            .execute()
+        resp = await client.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {settings.SLACK_BOT_TOKEN}"},
+            json={"channel": user_id, "text": text},
         )
-        db_rows = result.data
+        data = resp.json()
+        if not data.get("ok"):
+            print(f"[webhooks] chat.postMessage error: {data.get('error')}", flush=True)
 
-    if not db_rows or not db_rows[0].get("onboarding_complete"):
-        return JSONResponse(
-            {"text": "⚠️ Brand not set up yet. Run /slate-setup to get started."}
-        )
 
-    p = db_rows[0]
-    summary = (
-        f"✅ *SLATE Status*\n"
-        f"*Business:* {p.get('business_description', '')}\n"
-        f"*Audience:* {p.get('target_audience', '')}\n"
-        f"*Goals:* {p.get('content_goals', '')}\n"
-        f"*Tone:* {p.get('brand_tone', '')}\n"
-        f"*Cadence:* {p.get('cadence', '')}\n"
-        f"*Off limits:* {p.get('off_limits', '')}"
+# ---------------------------------------------------------------------------
+# Background task: handle all DM logic
+# ---------------------------------------------------------------------------
+
+async def _handle_dm(user_id: str, text: str) -> None:
+    db = get_client()
+    text_lower = text.lower().strip()
+
+    # Fetch brand profile
+    profile_rows = (
+        db.table("brand_profiles")
+        .select("*")
+        .eq("workspace_id", user_id)
+        .limit(1)
+        .execute()
     )
-    return JSONResponse({"text": summary})
+    profile = profile_rows.data[0] if profile_rows.data else None
 
+    # ── ONBOARDING PATH ──────────────────────────────────────────────────────
+    if not profile or not profile.get("onboarding_complete"):
+        step = profile.get("onboarding_step", 0) if profile else 0
+
+        if step == 0:
+            result = await onboarding.start_onboarding(user_id, user_id)
+        else:
+            result = await onboarding.process_onboarding_reply(user_id, step, text)
+
+        await _dm(user_id, result["message"])
+
+        if result.get("complete"):
+            # Onboarding done — kick off first autonomous carousel
+            await _dm(user_id, "⚡ Generating your first carousel now...")
+            try:
+                fresh = (
+                    db.table("brand_profiles")
+                    .select("*")
+                    .eq("workspace_id", user_id)
+                    .limit(1)
+                    .execute()
+                )
+                brand_profile = fresh.data[0]
+                from slate.pipeline.scheduler import run_autonomous_pipeline
+                result2 = await run_autonomous_pipeline(user_id, brand_profile)
+                await _dm(
+                    user_id,
+                    f"🎨 *Your first carousel is ready!*\n\n"
+                    f"*Topic:* {result2['topic']}\n\n"
+                    f"{result2['canva_url']}"
+                )
+            except Exception as exc:
+                print(f"[webhooks] first carousel error: {exc}", flush=True)
+                await _dm(user_id, "⚠️ Couldn't generate first carousel — try 'make a carousel' when ready.")
+        return
+
+    # ── BRAND EXISTS + ONBOARDING COMPLETE ───────────────────────────────────
+
+    # Intent: carousel creation
+    if any(kw in text_lower for kw in ("carousel", "make", "create", "build")):
+        await _dm(user_id, "⚡ On it! Generating your carousel now...")
+        try:
+            topic = await content_strategist.generate_topic(
+                workspace_id=user_id,
+                content_type="educational",
+                brand_profile=profile,
+            )
+            user_answers = (
+                f"Business: {profile.get('business_description', '')}\n"
+                f"Audience: {profile.get('target_audience', '')}\n"
+                f"Goals: {profile.get('content_goals', '')}\n"
+                f"Tone: {profile.get('brand_tone', '')}\n"
+                f"Off limits: {profile.get('off_limits', '')}"
+            )
+            r1 = await orchestrator.start_job(
+                slack_user_id=user_id,
+                slack_channel_id=user_id,
+                slack_thread_ts="",
+                topic=topic,
+                brand_image_urls=[],
+                style_image_url=None,
+                slack_bot_token=settings.SLACK_BOT_TOKEN,
+            )
+            r2 = await orchestrator.complete_job(r1["job_id"], user_answers)
+            await _dm(
+                user_id,
+                f"✅ *Carousel ready!*\n\n"
+                f"*Hook:* {r2['brief']['hook']}\n\n"
+                f"🎨 {r2['canva_url']}"
+            )
+        except Exception as exc:
+            print(f"[webhooks] carousel error: {exc}", flush=True)
+            await _dm(user_id, f"⚠️ Something went wrong: {exc}")
+        return
+
+    # Intent: status / profile
+    if any(kw in text_lower for kw in ("status", "profile", "brand")):
+        p = profile
+        summary = (
+            f"✅ *Your SLATE Brand Profile*\n"
+            f"*Business:* {p.get('business_description', '—')}\n"
+            f"*Audience:* {p.get('target_audience', '—')}\n"
+            f"*Goals:* {p.get('content_goals', '—')}\n"
+            f"*Tone:* {p.get('brand_tone', '—')}\n"
+            f"*Cadence:* {p.get('cadence', '—')}\n"
+            f"*Off limits:* {p.get('off_limits', '—')}"
+        )
+        await _dm(user_id, summary)
+        return
+
+    # Intent: performance rating
+    if any(kw in text_lower for kw in ("good", "average", "poor")):
+        try:
+            job_rows = (
+                db.table("carousel_jobs")
+                .select("id, topic, brief")
+                .eq("slack_user_id", user_id)
+                .eq("status", "done")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if job_rows.data:
+                job = job_rows.data[0]
+                hook = (job.get("brief") or {}).get("hook", "")
+                rating = next(r for r in ("good", "average", "poor") if r in text_lower)
+                await content_strategist.record_performance(
+                    workspace_id=user_id,
+                    carousel_job_id=job["id"],
+                    hook=hook,
+                    topic=job.get("topic", ""),
+                    content_type="unknown",
+                    performance_rating=rating,
+                )
+                await _dm(user_id, "Thanks! I'll use that to improve future carousels. 📊")
+            else:
+                await _dm(user_id, "No recent carousels to rate yet.")
+        except Exception as exc:
+            print(f"[webhooks] record_performance error: {exc}", flush=True)
+        return
+
+    # Default help message
+    await _dm(
+        user_id,
+        "Here's what I can do:\n\n"
+        "• *make a carousel* — generate a new carousel\n"
+        "• *show my profile* — see your brand setup\n"
+        "• *good / average / poor* — rate your last carousel\n\n"
+        "Or just message me any topic and I'll build a carousel around it."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Primary endpoint — all Slack Events API traffic
+# ---------------------------------------------------------------------------
 
 @router.post("/webhooks/slack/reply")
-async def slack_reply(
+async def slack_events(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
     body = await request.json()
 
-    # Slack url_verification
+    # Slack url_verification handshake
     if "challenge" in body:
         return JSONResponse({"challenge": body["challenge"]})
 
     event = body.get("event", {})
 
-    if event.get("type") != "message":
+    # Rule 1: only handle real user messages
+    if event.get("type") != "message" or event.get("bot_id") or event.get("subtype"):
         return JSONResponse({"ok": True})
 
-    # Ignore bot messages
-    if event.get("bot_id"):
+    # Rule 2: only DMs (channel_type == "im")
+    if event.get("channel_type") != "im":
         return JSONResponse({"ok": True})
 
-    user_text = event.get("text", "").strip()
+    user_id = event.get("user", "")
+    text = event.get("text", "").strip()
 
-    # --- DM: onboarding or performance rating ---
-    if event.get("channel_type") == "im":
-        workspace_id = event.get("channel", "")
-
-        if MOCK_MODE:
-            print(
-                f"[webhooks] MOCK_MODE — DM from workspace={workspace_id} text={user_text!r}",
-                flush=True,
-            )
-            return JSONResponse({"ok": True})
-
-        db = get_client()
-        profile_rows = (
-            db.table("brand_profiles")
-            .select("onboarding_complete, onboarding_step, id, topic, brand_tone")
-            .eq("workspace_id", workspace_id)
-            .limit(1)
-            .execute()
-        )
-
-        if profile_rows.data:
-            profile = profile_rows.data[0]
-
-            if not profile.get("onboarding_complete"):
-                step = profile.get("onboarding_step", 1)
-                background_tasks.add_task(
-                    _run_onboarding_reply, workspace_id, step, user_text
-                )
-                return JSONResponse({"ok": True})
-
-            # Performance rating reply
-            if user_text.lower() in ("good", "average", "poor"):
-                job_rows = (
-                    db.table("carousel_jobs")
-                    .select("id, topic, brief")
-                    .eq("slack_channel_id", workspace_id)
-                    .eq("status", "done")
-                    .order("created_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                if job_rows.data:
-                    job = job_rows.data[0]
-                    hook = (job.get("brief") or {}).get("hook", "")
-                    background_tasks.add_task(
-                        _run_record_performance,
-                        workspace_id,
-                        job["id"],
-                        hook,
-                        job.get("topic", ""),
-                        "unknown",
-                        user_text.lower(),
-                    )
-                return JSONResponse({"ok": True})
-
+    if not user_id or not text:
         return JSONResponse({"ok": True})
 
-    # --- Thread reply: carousel completion ---
-    thread_ts = event.get("thread_ts")
-    if not thread_ts:
-        return JSONResponse({"ok": True})
+    background_tasks.add_task(_handle_dm, user_id, text)
+    return JSONResponse({"ok": True})
 
-    if MOCK_MODE:
-        job_id = "mock-job-001"
-    else:
-        db = get_client()
-        rows = (
-            db.table("carousel_jobs")
-            .select("id")
-            .eq("slack_thread_ts", thread_ts)
-            .eq("status", "pending_answers")
-            .limit(1)
-            .execute()
-        )
-        if not rows.data:
-            return JSONResponse({"ok": True})
-        job_id = rows.data[0]["id"]
 
-    background_tasks.add_task(_run_complete_job, job_id, user_text, thread_ts)
+# ---------------------------------------------------------------------------
+# Stubbed slash command routes — kept so Railway doesn't 404
+# ---------------------------------------------------------------------------
 
+@router.post("/webhooks/slack")
+async def slack_slash_stub(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True})
+
+
+@router.post("/webhooks/slate-setup")
+async def slate_setup_stub(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True})
+
+
+@router.post("/webhooks/slate-status")
+async def slate_status_stub(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
